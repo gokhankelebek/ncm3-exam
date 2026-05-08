@@ -6,11 +6,40 @@ import {
 import { Stem } from "./math.jsx";
 import { F } from "./figures.jsx";
 import { MCQItem, GridItem, MatchItem, OrderItem } from "./items.jsx";
+import { CalculatorPanel } from "./calculator.jsx";
 import {
   startAttempt, saveProgress, submitAttempt,
   listAttempts, getExamPublic, signIn, signOut, getSession, onAuthStateChange,
   saveLocalSession, loadLocalSession, clearLocalSession,
 } from "./api.js";
+
+// Detect mobile/tablet width for responsive layout decisions
+function useIsMobile(breakpoint = 768) {
+  const [isMobile, setIsMobile] = useState(() =>
+    typeof window !== "undefined" && window.innerWidth < breakpoint
+  );
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < breakpoint);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [breakpoint]);
+  return isMobile;
+}
+
+// Lightweight sessionStorage-backed state (used for client-only data like
+// MCQ choice eliminations that don't need to round-trip the server).
+function useSessionState(key, initial) {
+  const [v, setV] = useState(() => {
+    try {
+      const raw = sessionStorage.getItem(key);
+      return raw ? JSON.parse(raw) : initial;
+    } catch { return initial; }
+  });
+  useEffect(() => {
+    try { sessionStorage.setItem(key, JSON.stringify(v)); } catch {}
+  }, [key, v]);
+  return [v, setV];
+}
 
 // =============================================================
 //  HEADER
@@ -229,30 +258,61 @@ function TestScreen({ session, onSubmitDone, onError }) {
   const { exam, attempt_id, started_at, student_name } = session;
   const QS = exam.questions;
   const mgr = useAttemptManager(session);
+  const isMobile = useIsMobile();
   const [idx, setIdx] = useState(0);
   const [showSubmit, setShowSubmit] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [navOpen, setNavOpen] = useState(false);   // mobile drawer
+  const [calcOpen, setCalcOpen] = useState(false);
+
+  // Per-question MCQ choice eliminations (client-only, sessionStorage-backed)
+  const [eliminations, setEliminations] = useSessionState(
+    `ncm3.elim.${attempt_id}`,
+    {}
+  );
+  const toggleEliminate = (qid, choiceIdx) => {
+    setEliminations((prev) => {
+      const cur = prev[qid] || [];
+      const next = cur.includes(choiceIdx)
+        ? cur.filter((x) => x !== choiceIdx)
+        : [...cur, choiceIdx];
+      return { ...prev, [qid]: next };
+    });
+  };
 
   const q = QS[idx];
   const total = QS.length;
-  const answered = QS.filter((qq) => {
+  const isAnswered = (qq) => {
     const a = mgr.answers[qq.i];
     if (a == null || a === "") return false;
     if (qq.t === "match") return a.assigns && a.assigns.every((x) => x >= 0);
     return true;
-  }).length;
+  };
+  const answered = QS.filter(isAnswered).length;
+  const unansweredIds = QS.filter((qq) => !isAnswered(qq)).map((qq) => qq.i);
+  const flaggedIds = mgr.flags.slice().sort((a, b) => a - b);
 
-  const [elapsed, setElapsed] = useState(Math.floor((Date.now() - new Date(started_at).getTime()) / 1000));
+  const [elapsed, setElapsed] = useState(
+    Math.floor((Date.now() - new Date(started_at).getTime()) / 1000)
+  );
   useEffect(() => {
-    const t = setInterval(() => setElapsed(Math.floor((Date.now() - new Date(started_at).getTime()) / 1000)), 1000);
+    const t = setInterval(
+      () => setElapsed(Math.floor((Date.now() - new Date(started_at).getTime()) / 1000)),
+      1000
+    );
     return () => clearInterval(t);
   }, [started_at]);
   const mins = Math.floor(elapsed / 60), secs = elapsed % 60;
 
-  // Track view event when navigating to a new question
-  useEffect(() => { mgr.trackView(q.i); /* eslint-disable-line */ }, [idx]);
+  // Track view event when question changes
+  useEffect(() => { mgr.trackView(q.i); /* eslint-disable-next-line */ }, [idx]);
 
   const flagged = mgr.flags.includes(q.i);
+  const goTo = (qid) => {
+    const j = QS.findIndex((qq) => qq.i === qid);
+    if (j >= 0) setIdx(j);
+    setNavOpen(false);
+  };
 
   const doSubmit = async () => {
     setSubmitting(true);
@@ -267,12 +327,45 @@ function TestScreen({ session, onSubmitDone, onError }) {
     }
   };
 
+  // ----- subcomponents inline -----
+  const Navigator = ({ inDrawer = false }) => (
+    <div>
+      <div style={{
+        fontFamily: "Bricolage Grotesque", fontSize: 11, color: T.ink3,
+        textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8,
+      }}>Navigator</div>
+      <div style={{ display: "grid", gridTemplateColumns: inDrawer ? "repeat(8, 1fr)" : "repeat(5, 1fr)", gap: 4 }}>
+        {QS.map((qq, j) => {
+          const ans = isAnswered(qq);
+          const isCur = j === idx;
+          const isFlag = mgr.flags.includes(qq.i);
+          return (
+            <button key={qq.i} onClick={() => { setIdx(j); setNavOpen(false); }}
+              style={{
+                aspectRatio: "1 / 1",
+                border: `1.5px solid ${isCur ? T.ink : ans ? T.saffron : T.rule2}`,
+                background: isCur ? T.ink : ans ? T.saffronSoft : "#fff",
+                color: isCur ? T.paper : ans ? T.saffronDark : T.ink2,
+                fontFamily: "JetBrains Mono", fontSize: 11, fontWeight: 600,
+                borderRadius: 6, cursor: "pointer", position: "relative",
+              }} title={qq.s}>
+              {qq.i}
+              {isFlag && <span style={{ position: "absolute", top: -3, right: -3, color: T.saffron, fontSize: 12 }}>★</span>}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+
   return (
     <div style={{ maxWidth: 980, margin: "0 auto" }}>
       <Header />
-      <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 20, flexWrap: "wrap" }}>
-        <div style={{ fontFamily: "JetBrains Mono", fontSize: 12, color: T.ink2 }}>
-          {student_name} · {session.exam.title}
+
+      {/* Top bar: identity, save status, timer, answered count, submit, calculator */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
+        <div style={{ fontFamily: "JetBrains Mono", fontSize: 12, color: T.ink2, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {student_name}
         </div>
         <div style={{ flex: 1 }} />
         <div style={{ fontFamily: "JetBrains Mono", fontSize: 12, color: mgr.saveError ? T.oxblood : T.ink3 }} title={mgr.saveError || ""}>
@@ -281,33 +374,79 @@ function TestScreen({ session, onSubmitDone, onError }) {
         <div style={{ fontFamily: "JetBrains Mono", fontSize: 13, color: T.ink2 }}>
           {String(mins).padStart(2, "0")}:{String(secs).padStart(2, "0")}
         </div>
-        <div style={{ fontFamily: "Bricolage Grotesque", fontSize: 13, color: T.ink2 }}>
-          {answered} of {total} answered
-        </div>
-        <button onClick={() => setShowSubmit(true)} style={{ ...primaryBtn, marginTop: 0, padding: "8px 16px", fontSize: 13 }}>Submit</button>
+        {!isMobile && (
+          <div style={{ fontFamily: "Bricolage Grotesque", fontSize: 13, color: T.ink2 }}>
+            {answered} of {total}
+          </div>
+        )}
+        <button
+          onClick={() => setCalcOpen((v) => !v)}
+          aria-label="Toggle calculator"
+          title="Calculator"
+          style={{
+            ...btnTiny, padding: "6px 10px", fontSize: 13,
+            background: calcOpen ? T.saffronSoft : "#fff",
+            borderColor: calcOpen ? T.saffron : T.rule2,
+            color: calcOpen ? T.saffronDark : T.ink2,
+          }}
+        >
+          ƒ calc
+        </button>
+        {isMobile && (
+          <button onClick={() => setNavOpen(true)} style={{ ...btnTiny, padding: "6px 10px", fontSize: 13 }}>
+            {idx + 1}/{total}
+          </button>
+        )}
+        <button onClick={() => setShowSubmit(true)} style={{ ...primaryBtn, marginTop: 0, padding: "8px 16px", fontSize: 13 }}>
+          Submit
+        </button>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 200px", gap: 24 }}>
+      {/* Main grid: question column + (desktop only) navigator rail */}
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : "minmax(0, 1fr) 200px",
+        gap: 24,
+      }}>
         <div>
-          <div style={{ display: "flex", alignItems: "baseline", gap: 12, marginBottom: 6 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 12, marginBottom: 6, flexWrap: "wrap" }}>
             <div style={{
-              fontFamily: "Fraunces, serif", fontSize: 38, fontWeight: 500, color: T.ink,
+              fontFamily: "Fraunces, serif", fontSize: isMobile ? 32 : 38, fontWeight: 500, color: T.ink,
               fontVariationSettings: '"opsz" 144', lineHeight: 1,
-            }}>{idx + 1}<span style={{ color: T.ink3, fontSize: 18, fontWeight: 400 }}>/{total}</span></div>
+            }}>
+              {idx + 1}<span style={{ color: T.ink3, fontSize: isMobile ? 16 : 18, fontWeight: 400 }}>/{total}</span>
+            </div>
             <div style={{ flex: 1 }} />
             <span style={{
               fontFamily: "JetBrains Mono", fontSize: 11, color: T.ink3,
               background: T.ivory, padding: "3px 8px", borderRadius: 12, letterSpacing: "0.04em",
             }}>{q.s} · DOK {q.k}</span>
-            <button onClick={() => mgr.toggleFlag(q.i)} style={{ ...btnTiny, background: flagged ? T.saffronSoft : "#fff", color: flagged ? T.saffronDark : T.ink2 }}>
+            <button
+              onClick={() => mgr.toggleFlag(q.i)}
+              style={{ ...btnTiny, background: flagged ? T.saffronSoft : "#fff", color: flagged ? T.saffronDark : T.ink2 }}
+            >
               {flagged ? "★ flagged" : "☆ flag"}
             </button>
           </div>
-          <div style={{ fontFamily: "Bricolage Grotesque", fontSize: 16, lineHeight: 1.6, color: T.ink, marginTop: 16 }}>
+
+          <div style={{
+            fontFamily: "Bricolage Grotesque",
+            fontSize: isMobile ? 17 : 16,
+            lineHeight: 1.6, color: T.ink, marginTop: 16,
+          }}>
             <Stem text={q.q} />
           </div>
           {q.f && F[q.f] && F[q.f]()}
-          {q.t === "mcq" && <MCQItem q={q} value={mgr.answers[q.i]} onChange={(v) => mgr.setAnswer(q.i, v)} />}
+
+          {q.t === "mcq" && (
+            <MCQItem
+              q={q}
+              value={mgr.answers[q.i]}
+              onChange={(v) => mgr.setAnswer(q.i, v)}
+              eliminated={eliminations[q.i] || []}
+              onToggleEliminate={(i) => toggleEliminate(q.i, i)}
+            />
+          )}
           {q.t === "grid" && <GridItem q={q} value={mgr.answers[q.i]} onChange={(v) => mgr.setAnswer(q.i, v)} />}
           {q.t === "match" && <MatchItem key={q.i} q={q} value={mgr.answers[q.i]} onChange={(v) => mgr.setAnswer(q.i, v)} />}
           {q.t === "order" && <OrderItem key={q.i} q={q} value={mgr.answers[q.i]} onChange={(v) => mgr.setAnswer(q.i, v)} />}
@@ -315,54 +454,128 @@ function TestScreen({ session, onSubmitDone, onError }) {
           <div style={{ display: "flex", gap: 10, marginTop: 28, paddingTop: 20, borderTop: `1px solid ${T.rule}` }}>
             <button onClick={() => setIdx(Math.max(0, idx - 1))} disabled={idx === 0} style={navBtn}>← prev</button>
             <div style={{ flex: 1 }} />
-            <button onClick={() => setIdx(Math.min(total - 1, idx + 1))} disabled={idx === total - 1}
-              style={{ ...navBtn, background: T.saffronSoft, borderColor: T.saffron, color: T.saffronDark }}>next →</button>
+            <button
+              onClick={() => setIdx(Math.min(total - 1, idx + 1))}
+              disabled={idx === total - 1}
+              style={{ ...navBtn, background: T.saffronSoft, borderColor: T.saffron, color: T.saffronDark }}
+            >
+              next →
+            </button>
           </div>
         </div>
 
-        <div>
-          <div style={{ fontFamily: "Bricolage Grotesque", fontSize: 11, color: T.ink3, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>Navigator</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 4 }}>
-            {QS.map((qq, j) => {
-              const ans = mgr.answers[qq.i];
-              let isAns = ans != null && ans !== "";
-              if (qq.t === "match") isAns = ans && ans.assigns && ans.assigns.every((x) => x >= 0);
-              const isCur = j === idx;
-              const isFlag = mgr.flags.includes(qq.i);
-              return (
-                <button key={qq.i} onClick={() => setIdx(j)}
-                  style={{
-                    aspectRatio: "1 / 1",
-                    border: `1.5px solid ${isCur ? T.ink : isAns ? T.saffron : T.rule2}`,
-                    background: isCur ? T.ink : isAns ? T.saffronSoft : "#fff",
-                    color: isCur ? T.paper : isAns ? T.saffronDark : T.ink2,
-                    fontFamily: "JetBrains Mono", fontSize: 11, fontWeight: 600,
-                    borderRadius: 6, cursor: "pointer", position: "relative",
-                  }} title={qq.s}>
-                  {qq.i}
-                  {isFlag && <span style={{ position: "absolute", top: -3, right: -3, color: T.saffron, fontSize: 12 }}>★</span>}
-                </button>
-              );
-            })}
+        {!isMobile && (
+          <div>
+            <Navigator />
+            <div style={{ marginTop: 12, fontSize: 11, color: T.ink3, fontFamily: "Bricolage Grotesque", lineHeight: 1.6 }}>
+              <div>
+                <span style={{ display: "inline-block", width: 10, height: 10, background: T.saffronSoft, border: `1px solid ${T.saffron}`, borderRadius: 2, marginRight: 6, verticalAlign: "middle" }} />
+                answered
+              </div>
+              <div>★ flagged for review</div>
+              <div style={{ marginTop: 8 }}>Tip: tap × on a choice to strike it through.</div>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
+      {/* Mobile navigator drawer */}
+      {isMobile && navOpen && (
+        <div
+          onClick={() => setNavOpen(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(16,32,46,0.40)", zIndex: 90, display: "flex", alignItems: "flex-end" }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: T.paper, width: "100%", maxHeight: "80vh", overflowY: "auto",
+              padding: 20, borderRadius: "16px 16px 0 0",
+              boxShadow: "0 -8px 32px rgba(16,32,46,0.20)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
+              <div style={{ fontFamily: "Fraunces, serif", fontSize: 22, color: T.ink, flex: 1 }}>Jump to question</div>
+              <button onClick={() => setNavOpen(false)} style={{ background: "none", border: "none", fontSize: 22, color: T.ink2, cursor: "pointer" }}>×</button>
+            </div>
+            <div style={{ fontFamily: "Bricolage Grotesque", fontSize: 13, color: T.ink2, marginBottom: 12 }}>
+              {answered} of {total} answered
+            </div>
+            <Navigator inDrawer />
+          </div>
+        </div>
+      )}
+
+      {/* Submit modal */}
       {showSubmit && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(16,32,46,0.40)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
-          <div style={{ background: T.paper, borderRadius: 16, padding: 32, maxWidth: 480, boxShadow: "0 20px 60px rgba(16,32,46,0.20)" }}>
-            <div style={{ fontFamily: "Fraunces, serif", fontSize: 28, color: T.ink, marginBottom: 12 }}>Submit your exam?</div>
-            <p style={{ fontFamily: "Bricolage Grotesque", fontSize: 15, color: T.ink2, lineHeight: 1.6 }}>
-              You have answered <strong>{answered}</strong> of <strong>{total}</strong> questions.
-              {answered < total && ` ${total - answered} unanswered.`} Once submitted, you cannot change answers.
+        <div style={{ position: "fixed", inset: 0, background: "rgba(16,32,46,0.40)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16 }}>
+          <div style={{
+            background: T.paper, borderRadius: 16, padding: 28, maxWidth: 540, width: "100%",
+            maxHeight: "90vh", overflowY: "auto",
+            boxShadow: "0 20px 60px rgba(16,32,46,0.20)",
+          }}>
+            <div style={{ fontFamily: "Fraunces, serif", fontSize: 28, color: T.ink, marginBottom: 8 }}>
+              Submit your exam?
+            </div>
+            <p style={{ fontFamily: "Bricolage Grotesque", fontSize: 15, color: T.ink2, lineHeight: 1.6, marginTop: 0 }}>
+              You answered <strong>{answered}</strong> of <strong>{total}</strong> questions.
+              Once submitted, you cannot change answers.
             </p>
-            <div style={{ display: "flex", gap: 10, marginTop: 20, justifyContent: "flex-end" }}>
-              <button onClick={() => setShowSubmit(false)} style={{ ...navBtn, background: "#fff" }} disabled={submitting}>Keep working</button>
-              <button onClick={doSubmit} style={primaryBtn} disabled={submitting}>{submitting ? "Submitting…" : "Submit final answers"}</button>
+
+            {unansweredIds.length > 0 && (
+              <div style={{ marginTop: 14, padding: "12px 14px", background: T.oxbloodSoft, borderRadius: 10 }}>
+                <div style={{ fontFamily: "JetBrains Mono", fontSize: 11, color: T.oxblood, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8, fontWeight: 600 }}>
+                  Unanswered ({unansweredIds.length})
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {unansweredIds.map((qid) => (
+                    <button key={qid} onClick={() => { goTo(qid); setShowSubmit(false); }}
+                      style={{
+                        fontFamily: "JetBrains Mono", fontSize: 12, fontWeight: 600,
+                        padding: "4px 10px", borderRadius: 6,
+                        border: `1px solid ${T.oxblood}`, background: "#fff",
+                        color: T.oxblood, cursor: "pointer",
+                      }}>Q{qid}</button>
+                  ))}
+                </div>
+                <div style={{ marginTop: 8, fontSize: 12, color: T.oxblood, fontFamily: "Bricolage Grotesque" }}>
+                  Click a question to jump back and answer it.
+                </div>
+              </div>
+            )}
+
+            {flaggedIds.length > 0 && (
+              <div style={{ marginTop: 12, padding: "12px 14px", background: T.saffronSoft, borderRadius: 10 }}>
+                <div style={{ fontFamily: "JetBrains Mono", fontSize: 11, color: T.saffronDark, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8, fontWeight: 600 }}>
+                  Flagged for review ({flaggedIds.length})
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {flaggedIds.map((qid) => (
+                    <button key={qid} onClick={() => { goTo(qid); setShowSubmit(false); }}
+                      style={{
+                        fontFamily: "JetBrains Mono", fontSize: 12, fontWeight: 600,
+                        padding: "4px 10px", borderRadius: 6,
+                        border: `1px solid ${T.saffron}`, background: "#fff",
+                        color: T.saffronDark, cursor: "pointer",
+                      }}>Q{qid}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 10, marginTop: 20, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button onClick={() => setShowSubmit(false)} style={{ ...navBtn, background: "#fff" }} disabled={submitting}>
+                Keep working
+              </button>
+              <button onClick={doSubmit} style={primaryBtn} disabled={submitting}>
+                {submitting ? "Submitting…" : "Submit final answers"}
+              </button>
             </div>
           </div>
         </div>
       )}
+
+      {/* Calculator panel */}
+      {calcOpen && <CalculatorPanel onClose={() => setCalcOpen(false)} isMobile={isMobile} />}
     </div>
   );
 }

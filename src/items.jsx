@@ -3,7 +3,7 @@ import { T, btnTiny } from "./tokens.js";
 import { Stem } from "./math.jsx";
 
 // ----- MCQ -----
-export function MCQItem({ q, value, onChange, locked, correct }) {
+export function MCQItem({ q, value, onChange, locked, correct, eliminated = [], onToggleEliminate }) {
   const letters = ["A", "B", "C", "D"];
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10, marginTop: 14 }}>
@@ -11,6 +11,7 @@ export function MCQItem({ q, value, onChange, locked, correct }) {
         const selected = value === i;
         const isCorrect = locked && i === correct;
         const isWrong = locked && selected && i !== correct;
+        const isEliminated = !locked && eliminated.includes(i);
         return (
           <button
             key={i}
@@ -24,16 +25,40 @@ export function MCQItem({ q, value, onChange, locked, correct }) {
               fontFamily: "Bricolage Grotesque, sans-serif", fontSize: 15,
               color: T.ink, display: "flex", gap: 12, alignItems: "flex-start",
               transition: "all 0.12s",
+              opacity: isEliminated && !selected ? 0.45 : 1,
             }}
           >
             <span style={{
               fontFamily: "JetBrains Mono, monospace", fontSize: 13,
               color: isCorrect ? T.forest : isWrong ? T.oxblood : selected ? T.saffronDark : T.ink3,
               fontWeight: 600, minWidth: 18,
+              textDecoration: isEliminated && !selected ? "line-through" : "none",
             }}>{letters[i]}</span>
-            <span style={{ flex: 1 }}><Stem text={choice} /></span>
+            <span style={{
+              flex: 1,
+              textDecoration: isEliminated && !selected ? "line-through" : "none",
+            }}><Stem text={choice} /></span>
             {isCorrect && <span style={{ color: T.forest, fontSize: 18 }}>✓</span>}
             {isWrong && <span style={{ color: T.oxblood, fontSize: 18 }}>✗</span>}
+            {!locked && onToggleEliminate && (
+              <span
+                role="button"
+                tabIndex={0}
+                aria-label={isEliminated ? `Restore choice ${letters[i]}` : `Eliminate choice ${letters[i]}`}
+                onClick={(e) => { e.stopPropagation(); onToggleEliminate(i); }}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.stopPropagation(); onToggleEliminate(i); } }}
+                title={isEliminated ? "Restore" : "Strike through"}
+                style={{
+                  fontFamily: "JetBrains Mono, monospace",
+                  fontSize: 14, lineHeight: 1, color: isEliminated ? T.saffronDark : T.ink3,
+                  padding: "4px 6px", borderRadius: 4,
+                  border: `1px solid ${isEliminated ? T.saffron : T.rule2}`,
+                  background: isEliminated ? T.saffronSoft : "#fff",
+                  cursor: "pointer", userSelect: "none",
+                  alignSelf: "center",
+                }}
+              >×</span>
+            )}
           </button>
         );
       })}
