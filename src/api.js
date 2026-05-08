@@ -42,6 +42,22 @@ export async function submitAttempt({ attempt_id }) {
   return data;
 }
 
+export async function getResumeCode({ attempt_id }) {
+  const { data, error } = await supabase.functions.invoke("get-resume-code", {
+    body: { attempt_id },
+  });
+  if (error) throw new Error(extractError(error, data));
+  return data;
+}
+
+export async function resumeAttempt({ code }) {
+  const { data, error } = await supabase.functions.invoke("resume-attempt", {
+    body: { code },
+  });
+  if (error) throw new Error(extractError(error, data));
+  return data;
+}
+
 // ----- Teacher-facing PostgREST queries (RLS-scoped) -----
 
 export async function listAttempts({ exam_id }) {

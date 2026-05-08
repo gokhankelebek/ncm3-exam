@@ -8,10 +8,27 @@ import { F } from "./figures.jsx";
 import { MCQItem, GridItem, MatchItem, OrderItem } from "./items.jsx";
 import { CalculatorPanel } from "./calculator.jsx";
 import {
-  startAttempt, saveProgress, submitAttempt,
+  startAttempt, saveProgress, submitAttempt, getResumeCode, resumeAttempt,
   listAttempts, getExamPublic, signIn, signOut, getSession, onAuthStateChange,
   saveLocalSession, loadLocalSession, clearLocalSession,
 } from "./api.js";
+
+// Exam unlock time. Edit this single constant to change when the exam opens.
+// Format is ISO 8601 with explicit offset so it's unambiguous across browsers.
+// May = EDT in NC = UTC-4.
+const EXAM_UNLOCK_AT = new Date("2026-05-09T12:00:00-04:00");
+
+function useCountdown(target) {
+  const [remaining, setRemaining] = useState(() => target.getTime() - Date.now());
+  useEffect(() => {
+    if (remaining <= 0) return;
+    const t = setInterval(() => {
+      setRemaining(target.getTime() - Date.now());
+    }, 1000);
+    return () => clearInterval(t);
+  }, [target, remaining]);
+  return remaining;
+}
 
 // Detect mobile/tablet width for responsive layout decisions
 function useIsMobile(breakpoint = 768) {
@@ -68,6 +85,9 @@ function Landing({ onStarted, onTeacher }) {
   const [email, setEmail] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [resumeCode, setResumeCode] = useState("");
+  const [resumeBusy, setResumeBusy] = useState(false);
+  const [resumeErr, setResumeErr] = useState("");
 
   const submit = async () => {
     setErr("");
@@ -81,7 +101,20 @@ function Landing({ onStarted, onTeacher }) {
         student_name: name.trim(),
         student_email: email.trim() || undefined,
       });
-      onStarted({ ...result, student_name: name.trim(), student_email: email.trim() || null });
+      // Best-effort: fetch the resume code so the student can see it later.
+      // If this call fails (e.g., function not deployed yet) we still proceed
+      // — the exam is started; pause-and-resume just won't work this session.
+      let resume_code = null;
+      try {
+        const rc = await getResumeCode({ attempt_id: result.attempt_id });
+        resume_code = rc.resume_code;
+      } catch {}
+      onStarted({
+        ...result,
+        student_name: name.trim(),
+        student_email: email.trim() || null,
+        resume_code,
+      });
     } catch (e) {
       setErr(e.message || "Could not start exam.");
     } finally {
@@ -89,10 +122,35 @@ function Landing({ onStarted, onTeacher }) {
     }
   };
 
+  const submitResume = async () => {
+    setResumeErr("");
+    const c = resumeCode.trim().toUpperCase();
+    if (!/^[A-Z2-9]{8}$/.test(c)) {
+      setResumeErr("Resume code is 8 letters/digits.");
+      return;
+    }
+    setResumeBusy(true);
+    try {
+      const result = await resumeAttempt({ code: c });
+      onStarted({ ...result, resume_code: c });
+    } catch (e) {
+      setResumeErr(e.message || "Could not resume.");
+    } finally {
+      setResumeBusy(false);
+    }
+  };
+
+  const remainingMs = useCountdown(EXAM_UNLOCK_AT);
+  const locked = remainingMs > 0;
+
   return (
     <div style={{ maxWidth: 640, margin: "0 auto" }}>
       <Header />
       <div style={{ padding: "36px 0 24px" }}>
+        {locked ? (
+          <LockedView remainingMs={remainingMs} unlockAt={EXAM_UNLOCK_AT} />
+        ) : (
+          <>
         <div style={{
           fontFamily: "Fraunces, serif", fontSize: 56, lineHeight: 1.05,
           fontWeight: 400, letterSpacing: "-0.02em", color: T.ink,
@@ -128,7 +186,30 @@ function Landing({ onStarted, onTeacher }) {
           </button>
         </div>
 
-        <div style={{ marginTop: 48, paddingTop: 20, borderTop: `1px solid ${T.rule}`, fontSize: 12, color: T.ink3 }}>
+        <div style={{ marginTop: 36, paddingTop: 20, borderTop: `1px solid ${T.rule}`, maxWidth: 420 }}>
+          <div style={{ ...panelHead, marginBottom: 10 }}>Resume an in-progress exam</div>
+          <div style={{ display: "grid", gap: 10 }}>
+            <label style={lbl}>
+              <span>Resume code <span style={{ color: T.ink3 }}>(8 letters/digits)</span></span>
+              <input
+                style={{ ...inpt, fontFamily: "JetBrains Mono, monospace", letterSpacing: "0.12em", textTransform: "uppercase" }}
+                value={resumeCode}
+                onChange={(e) => setResumeCode(e.target.value.toUpperCase().replace(/[^A-Z2-9]/g, "").slice(0, 8))}
+                placeholder="K3F9P2T8"
+                disabled={resumeBusy}
+                maxLength={8}
+              />
+            </label>
+            {resumeErr && <div style={{ color: T.oxblood, fontSize: 13, fontFamily: "Bricolage Grotesque" }}>{resumeErr}</div>}
+            <button onClick={submitResume} disabled={resumeBusy} style={{ ...navBtn, opacity: resumeBusy ? 0.6 : 1 }}>
+              {resumeBusy ? "Looking up…" : "Resume exam →"}
+            </button>
+          </div>
+        </div>
+          </>
+        )}
+
+        <div style={{ marginTop: 36, paddingTop: 20, borderTop: `1px solid ${T.rule}`, fontSize: 12, color: T.ink3 }}>
           <button onClick={onTeacher} style={{ background: "none", border: "none", color: T.ink3, fontFamily: "Bricolage Grotesque", fontSize: 12, cursor: "pointer", padding: 0, textDecoration: "underline" }}>
             Teacher login →
           </button>
@@ -138,19 +219,85 @@ function Landing({ onStarted, onTeacher }) {
   );
 }
 
+function LockedView({ remainingMs, unlockAt }) {
+  const total = Math.max(0, Math.floor(remainingMs / 1000));
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  const unlockLabel = unlockAt.toLocaleString("en-US", {
+    timeZone: "America/New_York",
+    weekday: "long", month: "long", day: "numeric",
+    hour: "numeric", minute: "2-digit", timeZoneName: "short",
+  });
+  return (
+    <div>
+      <div style={{
+        fontFamily: "Fraunces, serif", fontSize: 56, lineHeight: 1.05,
+        fontWeight: 400, letterSpacing: "-0.02em", color: T.ink,
+        fontVariationSettings: '"opsz" 144, "SOFT" 30', marginBottom: 16,
+      }}>
+        The exam<br />
+        <em style={{ color: T.saffron }}>opens soon.</em>
+      </div>
+      <p style={{ fontFamily: "Bricolage Grotesque", fontSize: 15, color: T.ink2, lineHeight: 1.65, maxWidth: 520 }}>
+        Available <strong>{unlockLabel}</strong>. Come back here to start the exam.
+      </p>
+
+      <div style={{
+        marginTop: 28, padding: "24px 28px",
+        background: "#fff", border: `1.5px solid ${T.rule2}`, borderRadius: 14,
+        maxWidth: 480, display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8,
+      }}>
+        {[
+          { label: "days", val: days },
+          { label: "hours", val: hours },
+          { label: "minutes", val: minutes },
+          { label: "seconds", val: seconds },
+        ].map((u) => (
+          <div key={u.label} style={{ textAlign: "center" }}>
+            <div style={{
+              fontFamily: "JetBrains Mono, monospace", fontSize: 36, fontWeight: 600,
+              color: T.ink, lineHeight: 1,
+            }}>{pad(u.val)}</div>
+            <div style={{
+              fontFamily: "Bricolage Grotesque", fontSize: 11, color: T.ink3,
+              textTransform: "uppercase", letterSpacing: "0.08em", marginTop: 6,
+            }}>{u.label}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // =============================================================
 //  useAttemptManager — handles answers, debounced auto-save, events
 // =============================================================
 function useAttemptManager(initial) {
-  // initial = { attempt_id, exam, started_at }
-  const [answers, setAnswers] = useState({});
-  const [flags, setFlags] = useState([]);
+  // initial = { attempt_id, exam, started_at, answers?, flags?, student_name?, student_email?, resume_code? }
+  const [answers, setAnswers] = useState(initial.answers || {});
+  const [flags, setFlags] = useState(initial.flags || []);
   const [saving, setSaving] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState(null);
   const [saveError, setSaveError] = useState(null);
+  // Resume code: filled from initial if known, otherwise fetched on mount so
+  // the Pause modal always has it (even for sessions that started before this
+  // feature existed).
+  const [resumeCode, setResumeCode] = useState(initial.resume_code || null);
   const eventQueueRef = useRef([]);
   const saveTimerRef = useRef(null);
   const dirtyRef = useRef(false);
+  // Single in-flight save loop. Concurrent flushSave calls coalesce onto it.
+  const savePromiseRef = useRef(null);
+
+  // Mirror latest state into refs so the save loop reads fresh data on each
+  // iteration without re-creating flushSave (which would re-enter the loop).
+  const answersRef = useRef(answers);
+  const flagsRef = useRef(flags);
+  useEffect(() => { answersRef.current = answers; }, [answers]);
+  useEffect(() => { flagsRef.current = flags; }, [flags]);
 
   // Persist locally so a refresh resumes where you left off (same browser)
   useEffect(() => {
@@ -158,46 +305,100 @@ function useAttemptManager(initial) {
       attempt_id: initial.attempt_id,
       exam: initial.exam,
       started_at: initial.started_at,
+      student_name: initial.student_name,
+      student_email: initial.student_email,
+      resume_code: resumeCode,
       answers,
       flags,
     });
-  }, [initial, answers, flags]);
+  }, [initial, answers, flags, resumeCode]);
 
-  const flushSave = useCallback(async () => {
+  // Self-heal: if no resume code is known yet, fetch it from the server.
+  // Covers (a) sessions started before this feature existed, (b) the rare
+  // case where the initial fetch on Landing failed silently.
+  useEffect(() => {
+    if (resumeCode || !initial.attempt_id) return;
+    let cancelled = false;
+    getResumeCode({ attempt_id: initial.attempt_id })
+      .then((d) => {
+        if (!cancelled && d?.resume_code) setResumeCode(d.resume_code);
+      })
+      .catch((e) => {
+        // Swallow — Pause modal will fall back to its "unavailable" branch.
+        // eslint-disable-next-line no-console
+        console.warn("[ncm3] could not fetch resume_code:", e?.message || e);
+      });
+    return () => { cancelled = true; };
+  }, [resumeCode, initial.attempt_id]);
+
+  // One save with up to MAX_ATTEMPTS tries on failure (exponential backoff).
+  const saveOnce = useCallback(async () => {
     if (!dirtyRef.current) return;
     dirtyRef.current = false;
     setSaving(true);
     setSaveError(null);
     const events = eventQueueRef.current;
     eventQueueRef.current = [];
-    try {
-      await saveProgress({
-        attempt_id: initial.attempt_id,
-        answers, flags,
-        events: events.length ? events : undefined,
-      });
-      setLastSavedAt(Date.now());
-    } catch (e) {
-      setSaveError(e.message || "save failed");
-      // re-queue events on failure so they aren't lost
-      eventQueueRef.current = [...events, ...eventQueueRef.current];
-      dirtyRef.current = true;
-    } finally {
-      setSaving(false);
+
+    const MAX_ATTEMPTS = 5;
+    let attempt = 0;
+    while (true) {
+      attempt++;
+      try {
+        await saveProgress({
+          attempt_id: initial.attempt_id,
+          answers: answersRef.current,
+          flags: flagsRef.current,
+          events: events.length ? events : undefined,
+        });
+        setLastSavedAt(Date.now());
+        setSaveError(null);
+        setSaving(false);
+        return;
+      } catch (e) {
+        if (attempt >= MAX_ATTEMPTS) {
+          // Give up; re-queue events so any future change triggers a fresh save.
+          eventQueueRef.current = [...events, ...eventQueueRef.current];
+          dirtyRef.current = true;
+          setSaveError(e?.message || "save failed");
+          setSaving(false);
+          throw e;
+        }
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 8000);
+        setSaveError(`retrying (${attempt}/${MAX_ATTEMPTS - 1})…`);
+        await new Promise((r) => setTimeout(r, delay));
+      }
     }
-  }, [initial.attempt_id, answers, flags]);
+  }, [initial.attempt_id]);
+
+  const flushSave = useCallback(() => {
+    // Coalesce concurrent callers onto the single in-flight loop. The loop
+    // keeps saving as long as new dirty data accumulates mid-flight.
+    if (savePromiseRef.current) return savePromiseRef.current;
+    if (!dirtyRef.current) return Promise.resolve();
+
+    const loop = (async () => {
+      while (dirtyRef.current) {
+        await saveOnce();
+      }
+    })().finally(() => {
+      savePromiseRef.current = null;
+    });
+    savePromiseRef.current = loop;
+    return loop;
+  }, [saveOnce]);
 
   // Debounced save on answer/flag change
   useEffect(() => {
     if (!dirtyRef.current) return;
     clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(() => { flushSave(); }, 800);
+    saveTimerRef.current = setTimeout(() => { flushSave().catch(() => {}); }, 800);
     return () => clearTimeout(saveTimerRef.current);
   }, [answers, flags, flushSave]);
 
   // Save on page hide (best-effort)
   useEffect(() => {
-    const onHide = () => { if (dirtyRef.current) flushSave(); };
+    const onHide = () => { if (dirtyRef.current) flushSave().catch(() => {}); };
     window.addEventListener("visibilitychange", onHide);
     window.addEventListener("beforeunload", onHide);
     return () => {
@@ -248,19 +449,23 @@ function useAttemptManager(initial) {
     setAnswer, toggleFlag, trackView,
     flushSave,
     saving, lastSavedAt, saveError,
+    resumeCode,
   };
 }
 
 // =============================================================
 //  TEST SCREEN
 // =============================================================
-function TestScreen({ session, onSubmitDone, onError }) {
+function TestScreen({ session, onSubmitDone, onError, onExit }) {
   const { exam, attempt_id, started_at, student_name } = session;
   const QS = exam.questions;
   const mgr = useAttemptManager(session);
+  const resume_code = mgr.resumeCode;
   const isMobile = useIsMobile();
   const [idx, setIdx] = useState(0);
   const [showSubmit, setShowSubmit] = useState(false);
+  const [showPause, setShowPause] = useState(false);
+  const [pausing, setPausing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [navOpen, setNavOpen] = useState(false);   // mobile drawer
   const [calcOpen, setCalcOpen] = useState(false);
@@ -325,6 +530,18 @@ function TestScreen({ session, onSubmitDone, onError }) {
       onError(e.message || "Submit failed");
       setSubmitting(false);
     }
+  };
+
+  const doPauseExit = async () => {
+    setPausing(true);
+    try {
+      await mgr.flushSave();
+    } catch {
+      // Save failed after retries — let them exit anyway; server has whatever
+      // was last persisted. Their resume code still works.
+    }
+    clearLocalSession();
+    onExit && onExit();
   };
 
   // ----- subcomponents inline -----
@@ -397,6 +614,13 @@ function TestScreen({ session, onSubmitDone, onError }) {
             {idx + 1}/{total}
           </button>
         )}
+        <button
+          onClick={() => setShowPause(true)}
+          title="Pause and get a resume code"
+          style={{ ...btnTiny, padding: "6px 10px", fontSize: 13 }}
+        >
+          ⏸ pause
+        </button>
         <button onClick={() => setShowSubmit(true)} style={{ ...primaryBtn, marginTop: 0, padding: "8px 16px", fontSize: 13 }}>
           Submit
         </button>
@@ -568,6 +792,67 @@ function TestScreen({ session, onSubmitDone, onError }) {
               </button>
               <button onClick={doSubmit} style={primaryBtn} disabled={submitting}>
                 {submitting ? "Submitting…" : "Submit final answers"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Pause modal */}
+      {showPause && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(16,32,46,0.40)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 16 }}>
+          <div style={{
+            background: T.paper, borderRadius: 16, padding: 28, maxWidth: 520, width: "100%",
+            boxShadow: "0 20px 60px rgba(16,32,46,0.20)",
+          }}>
+            <div style={{ fontFamily: "Fraunces, serif", fontSize: 28, color: T.ink, marginBottom: 8 }}>
+              Pause and resume later
+            </div>
+            <p style={{ fontFamily: "Bricolage Grotesque", fontSize: 15, color: T.ink2, lineHeight: 1.6, marginTop: 0 }}>
+              Write down or copy your resume code. From any browser, on the start
+              page, paste it into <em>Resume an in-progress exam</em> to pick up
+              right where you left off.
+            </p>
+            {resume_code ? (
+              <div style={{
+                marginTop: 14, padding: "20px 16px", background: "#fff",
+                border: `1.5px solid ${T.saffron}`, borderRadius: 12,
+                textAlign: "center",
+              }}>
+                <div style={{
+                  fontFamily: "JetBrains Mono, monospace", fontSize: 32, fontWeight: 600,
+                  letterSpacing: "0.18em", color: T.ink,
+                }}>
+                  {resume_code}
+                </div>
+                <button
+                  onClick={() => { try { navigator.clipboard.writeText(resume_code); } catch {} }}
+                  style={{ ...btnTiny, marginTop: 10, fontSize: 12 }}
+                >
+                  copy
+                </button>
+              </div>
+            ) : (
+              <div style={{ marginTop: 14, padding: "12px 14px", background: T.oxbloodSoft, borderRadius: 10, color: T.oxblood, fontSize: 13, fontFamily: "Bricolage Grotesque" }}>
+                Resume code unavailable for this session. You can still close
+                the tab and come back in this same browser to resume — but you
+                won't be able to resume from a different device.
+              </div>
+            )}
+            <div style={{ marginTop: 20, display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button
+                onClick={() => setShowPause(false)}
+                style={{ ...navBtn, background: "#fff" }}
+                disabled={pausing}
+              >
+                Keep working
+              </button>
+              <button
+                onClick={doPauseExit}
+                disabled={pausing}
+                style={{ ...primaryBtn, marginTop: 0 }}
+              >
+                {pausing ? "Saving…" : "Save & exit"}
               </button>
             </div>
           </div>
@@ -1179,6 +1464,9 @@ export default function App() {
   // Restore in-progress attempt from sessionStorage
   useEffect(() => {
     if (route !== "landing") return;
+    // Honor the unlock window: don't auto-restore into the test screen if
+    // the exam isn't open yet. The Landing screen will show the countdown.
+    if (Date.now() < EXAM_UNLOCK_AT.getTime()) return;
     const local = loadLocalSession();
     if (local && local.attempt_id && local.exam) {
       setSession({
@@ -1187,6 +1475,9 @@ export default function App() {
         started_at: local.started_at,
         student_name: local.student_name || "(resumed)",
         student_email: local.student_email || null,
+        resume_code: local.resume_code || null,
+        answers: local.answers || {},
+        flags: local.flags || [],
       });
       setRoute("test");
     }
@@ -1200,9 +1491,13 @@ export default function App() {
       started_at: data.started_at,
       student_name: data.student_name || "Student",
       student_email: data.student_email || null,
+      resume_code: data.resume_code || null,
+      // When resuming from a code, server returns saved answers/flags
+      answers: data.answers || {},
+      flags: data.flags || [],
     };
     setSession(newSession);
-    saveLocalSession({ ...newSession, answers: {}, flags: [] });
+    saveLocalSession(newSession);
     setRoute("test");
   };
 
@@ -1303,7 +1598,7 @@ export default function App() {
     return wrap(<Landing onStarted={handleStarted} onTeacher={() => setRoute("teacher-login")} />);
   }
   if (route === "test" && session) {
-    return wrap(<TestScreen session={session} onSubmitDone={handleSubmitDone} onError={(e) => setError(e)} />);
+    return wrap(<TestScreen session={session} onSubmitDone={handleSubmitDone} onError={(e) => setError(e)} onExit={handleRestart} />);
   }
   if (route === "results" && session && result) {
     return wrap(<ResultsScreen session={session} result={result} onReview={() => setRoute("review")} onPrint={() => setRoute("print")} onRestart={handleRestart} />);
