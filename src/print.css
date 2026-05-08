@@ -1,0 +1,42 @@
+/* =============================================================
+   print.css — applied only when student prints the report
+   ============================================================= */
+
+@media print {
+  /* Hide everything by default during print */
+  body * {
+    visibility: hidden;
+  }
+  /* Show only the print region and its descendants */
+  .print-region,
+  .print-region * {
+    visibility: visible;
+  }
+  .print-region {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    background: white !important;
+    color: black !important;
+    padding: 24px 32px !important;
+  }
+  /* Force solid colors / no fancy backgrounds in print */
+  .no-print {
+    display: none !important;
+  }
+  /* Each question on its own block, avoid breaking mid-question */
+  .print-q {
+    page-break-inside: avoid;
+    break-inside: avoid;
+    border: 1px solid #ccc;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    border-radius: 4px;
+  }
+  /* Page setup */
+  @page {
+    margin: 12mm 14mm;
+    size: letter;
+  }
+}
